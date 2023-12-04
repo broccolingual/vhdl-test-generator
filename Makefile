@@ -1,7 +1,7 @@
 .PHONY: clean install run build
 
 clean:
-	rm -rf main.exe
+	rm -rf gen.exe
 
 install:
 	# install 3rd party library
@@ -11,4 +11,4 @@ run:
 	go run main.go
 
 build: install clean
-	go build -ldflags="-s -w -buildid=" -trimpath -o main.exe main.go
+	go build -ldflags="-s -w -buildid=" -trimpath -o gen.exe main.go
