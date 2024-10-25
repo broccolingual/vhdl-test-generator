@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,29 +22,67 @@ type Port struct {
 
 type Ports []*Port
 
-func LoadVHDLFile(path string) ([]string, error) {
-	fp, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer fp.Close()
+type VHDL struct {
+	Entity    string
+	Ports     Ports
+	ClkPort   Port
+	ResetPort Port
+	lines     []string
+}
 
+func LoadVHDL(fp *os.File) (*VHDL, error) {
 	scanner := bufio.NewScanner(fp)
 	var lines []string
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
 	}
-	return lines, nil
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return &VHDL{lines: lines}, nil
+}
+
+func (vhdl *VHDL) Parse() error {
+	entityStarted := false
+	entityName := ""
+	for _, line := range vhdl.lines {
+		formattedLine := FormatLine(line)
+		name, _ := ParseEntityStart(formattedLine)
+		if name != "" {
+			entityStarted = true
+			entityName = name
+		}
+		if entityStarted {
+			if ok, _ := ParseEntityEnd(formattedLine, entityName); ok {
+				entityStarted = false
+			}
+
+			port, _ := ParsePort(formattedLine)
+			if port != nil {
+				vhdl.Ports = append(vhdl.Ports, port)
+			}
+		}
+	}
+
+	vhdl.Entity = entityName
+	for _, port := range vhdl.Ports {
+		if strings.Contains(port.Name, "CLK") && port.Type == "std_logic" {
+			vhdl.ClkPort = *port
+		} else if (port.Name == "RST" || port.Name == "RESET") && port.Type == "std_logic" {
+			vhdl.ResetPort = *port
+		}
+	}
+	return nil
 }
 
 func ParsePort(line string) (*Port, error) {
-	re, err := regexp.Compile(`(?P<name>\w+)\s*:\s*(?P<inout>in|out)\s*(?P<type>\w+)\s*(?P<range>\(\s*(?P<msb>\d+)\s*(?:downto|to)\s*(?P<lsb>\d+)\s*\))?`)
+	re, err := regexp.Compile(`(?P<name>\w+)\s*:\s*(?P<inout>in|out|inout)\s*(?P<type>\w+)\s*(?P<range>\(\s*(?P<msb>\d+)\s*(?:downto|to)\s*(?P<lsb>\d+)\s*\))?`)
 	if err != nil {
 		return nil, err
 	}
 	matches := re.FindStringSubmatch(line)
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("No matches")
+		return nil, fmt.Errorf("no matches")
 	}
 	port := &Port{
 		Name:  matches[1],
@@ -64,7 +103,7 @@ func ParseEntityStart(line string) (string, error) {
 	}
 	matches := re.FindStringSubmatch(line)
 	if len(matches) == 0 {
-		return "", fmt.Errorf("No matches")
+		return "", fmt.Errorf("no matches")
 	}
 	return matches[1], nil
 }
@@ -76,61 +115,13 @@ func ParseEntityEnd(line string, name string) (bool, error) {
 	}
 	matches := re.FindStringSubmatch(line)
 	if len(matches) == 0 {
-		return false, fmt.Errorf("No matches")
+		return false, fmt.Errorf("no matches")
 	}
 	return matches[1] == name, nil
 }
 
 func FormatLine(line string) string {
 	return strings.Join(strings.Fields(line), " ")
-}
-
-func (ports Ports) ConvPorts() string {
-	format := ""
-	for _, port := range ports {
-		if port.Type == "std_logic" {
-			format += fmt.Sprintf("\t%s : %s %s;\n", port.Name, port.InOut, port.Type)
-		} else {
-			format += fmt.Sprintf("\t%s : %s %s(%d downto %d);\n", port.Name, port.InOut, port.Type, port.MSB, port.LSB)
-		}
-	}
-	return format[:len(format)-2]
-}
-
-func (ports Ports) ConvInputs() string {
-	format := ""
-	for _, port := range ports {
-		if port.InOut == "in" {
-			if port.Type == "std_logic" {
-				format += fmt.Sprintf("\tsignal %s : %s := '0';\n", port.Name, port.Type)
-			} else {
-				format += fmt.Sprintf("\tsignal %s : %s(%d downto %d) := (others => '0');\n", port.Name, port.Type, port.MSB, port.LSB)
-			}
-		}
-	}
-	return format[:len(format)-1]
-}
-
-func (ports Ports) ConvOutputs() string {
-	format := ""
-	for _, port := range ports {
-		if port.InOut == "out" {
-			if port.Type == "std_logic" {
-				format += fmt.Sprintf("\tsignal %s : %s;\n", port.Name, port.Type)
-			} else {
-				format += fmt.Sprintf("\tsignal %s : %s(%d downto %d);\n", port.Name, port.Type, port.MSB, port.LSB)
-			}
-		}
-	}
-	return format[:len(format)-1]
-}
-
-func (ports Ports) ConvPortMap() string {
-	format := ""
-	for _, port := range ports {
-		format += fmt.Sprintf("\t%s => %s,\n", port.Name, port.Name)
-	}
-	return format[:len(format)-2]
 }
 
 func main() {
@@ -140,49 +131,40 @@ func main() {
 	)
 	flag.Parse()
 
-	lines, err := LoadVHDLFile(*inputPath)
+	inputFp, err := os.Open(*inputPath)
 	if err != nil {
 		panic(err)
 	}
-	ports := make(Ports, 0)
-	entityStarted := false
-	entityName := ""
-	for _, line := range lines {
-		formattedLine := FormatLine(line)
-		name, _ := ParseEntityStart(formattedLine)
-		if name != "" {
-			entityStarted = true
-			entityName = name
-		}
-		if entityStarted {
-			if ok, _ := ParseEntityEnd(formattedLine, entityName); ok {
-				entityStarted = false
-			}
+	defer inputFp.Close()
 
-			port, _ := ParsePort(formattedLine)
-			if port != nil {
-				ports = append(ports, port)
-			}
-		}
-	}
-	tpl, err := template.ParseFiles("templates/test.vhd")
+	vhdl, err := LoadVHDL(inputFp)
 	if err != nil {
 		panic(err)
 	}
-	m := map[string]interface{}{
-		"entityName":    fmt.Sprintf("Test_%s", entityName),
-		"componentName": entityName,
-		"ports":         ports.ConvPorts(),
-		"inputs":        ports.ConvInputs(),
-		"outputs":       ports.ConvOutputs(),
-		"portMap":       ports.ConvPortMap(),
-	}
-	fp, err := os.Create(*outputPath)
+
+	vhdl.Parse()
+
+	tpl, err := template.New("tb").Funcs(template.FuncMap{
+		"sub": func(a, b int) int {
+			return a - b
+		},
+	}).ParseFiles("vhd.tpl")
 	if err != nil {
 		panic(err)
 	}
-	defer fp.Close()
-	err = tpl.Execute(fp, m)
+
+	if *outputPath == "" {
+		dir := filepath.Dir(*inputPath)
+		*outputPath = filepath.Join(dir, fmt.Sprintf("tb_%s.vhd", vhdl.Entity))
+	}
+
+	outputFp, err := os.Create(*outputPath)
+	if err != nil {
+		panic(err)
+	}
+	defer outputFp.Close()
+
+	err = tpl.ExecuteTemplate(outputFp, "tb", vhdl)
 	if err != nil {
 		panic(err)
 	}

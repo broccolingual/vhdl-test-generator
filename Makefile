@@ -7,7 +7,7 @@ install:
 	# install 3rd party library
 	# go get ~
 
-run: 
+run:
 	go run main.go
 
 build: install clean
